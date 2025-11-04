@@ -1,0 +1,9 @@
+export_history:
+  name: Export history
+  description: Export pour history to /config/www/beer_keg_history.json and notify.
+  fields: {}
+
+refresh_kegs:
+  name: Refresh kegs
+  description: Fetch /api/kegs and merge new/updated kegs into Home Assistant.
+  fields: {}

@@ -1,0 +1,32 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Beer Keg Scale",
+        "description": "Connect to your keg scale server.",
+        "data": {
+          "ws_url": "WebSocket URL (e.g. ws://192.168.8.141:8085/ws)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the server"
+    },
+    "abort": {
+      "already_configured": "This server is already configured"
+    },
+    "options": {
+      "step": {
+        "init": {
+          "title": "Beer Keg Options",
+          "data": {
+            "empty_weight": "Empty keg weight (kg)",
+            "default_full_weight": "Default full weight (kg)",
+            "pour_threshold": "Pour threshold (kg)",
+            "per_keg_full": "Per-keg full weights JSON (id->kg)"
+          }
+        }
+      }
+    }
+  }
+}
