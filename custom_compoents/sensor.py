@@ -41,6 +41,14 @@ SENSOR_TYPES = {
         "device_class": None,
         "state_class": "measurement",
     },
+        "fill_level": {              # <— legacy alias for older dashboards
+        "unit": "%",
+        "name": "Fill Level",
+        "key": "fill_percent",   # <— read the same backing value
+        "icon": "mdi:cup",
+        "device_class": None,
+        "state_class": "measurement",
+    },
     "last_pour": {
         "unit": "oz",  # ounces
         "name": "Last Pour",

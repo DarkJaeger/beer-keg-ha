@@ -4,8 +4,11 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List
+
+import aiohttp
+from urllib.parse import urlparse, urlunparse
 
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.config_entries import ConfigEntry
@@ -30,7 +33,13 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = ["sensor"]
 
-KG_TO_OZ = 35.274  # Conversion constant
+# --- Behavior constants ---
+KG_TO_OZ = 35.274
+REST_POLL_SECONDS = 10
+STARTUP_GRACE_SEC = 10
+WS_PING_SEC = 30
+DATA_STALE_SEC = 45
+LAST_UPDATE_KEY = "last_update_ts"
 
 
 def _coerce_float(val, default=0.0):
@@ -94,49 +103,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "default_full": default_full,
             "pour_threshold": pour_threshold,
             "per_keg_full": per_keg_full,
-            "kegs": {},
-            "data": {},
+            "kegs": {},          # runtime per-keg (last_weight, last_pour, etc.)
+            "data": {},          # values exposed to sensor.py
             "history": [],
             "store": store,
+            LAST_UPDATE_KEY: None,
         }
 
+        # ----- Load history (non-blocking) -----
         loaded = await store.async_load()
         if isinstance(loaded, list):
             state["history"] = loaded
             _LOGGER.info("beer_keg: Loaded %d pour records", len(state["history"]))
 
-        # ----- REST fetch -----
-        import aiohttp
-        from urllib.parse import urlparse, urlunparse
-
+        # ----- Helpers -----
         async def fetch_kegs() -> List[Dict[str, Any]]:
+            """Fetch /api/kegs. Accepts list[...] or dict{'kegs':[...]}."""
             try:
                 u = urlparse(ws_url)
                 scheme = "http" if u.scheme == "ws" else "https" if u.scheme == "wss" else "http"
                 base = urlunparse((scheme, u.netloc, "", "", "", ""))
-                urls = [f"{base}/api/kegs", f"{base}/api/kegs/"]
+                urls = (f"{base}/api/kegs", f"{base}/api/kegs/")
 
-                async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession() as http:
                     for url in urls:
                         try:
-                            async with session.get(url) as resp:
+                            async with http.get(url) as resp:
                                 if resp.status != 200:
+                                    body = await resp.text()
+                                    _LOGGER.debug("beer_keg: GET %s -> %s; body(head)=%s", url, resp.status, body[:200])
                                     continue
-                                data = await resp.json()
+                                try:
+                                    data = await resp.json()
+                                except Exception as e:
+                                    txt = await resp.text()
+                                    _LOGGER.warning("beer_keg: Non-JSON from %s: %s (%s)", url, txt[:200], e)
+                                    continue
+
                                 if isinstance(data, list):
                                     return data
                                 if isinstance(data, dict) and isinstance(data.get("kegs"), list):
                                     return data["kegs"]
                         except Exception as e:
-                            _LOGGER.warning("beer_keg: REST GET %s failed: %s", url, e)
+                            _LOGGER.warning("beer_keg: REST GET failed %s (%s)", url, e)
                 return []
             except Exception as e:
-                _LOGGER.error("beer_keg: fetch_kegs error: %s", e)
+                _LOGGER.error("beer_keg: fetch_kegs error (outer): %s", e)
                 return []
 
-        # ----- Update publisher -----
         async def _publish_keg(norm: dict):
-            """Update state & fire update event."""
+            """Update state & fire update event (with oz conversion for pours)."""
             keg_id = norm["keg_id"]
             weight = norm["weight"]
             temp = norm["temperature"]
@@ -146,69 +162,76 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 fw = norm["full_weight"] or per_keg_full.get(keg_id, default_full)
                 info = state["kegs"][keg_id] = {
                     "last_weight": weight,
-                    "daily_consumed": 0.0,
-                    "last_pour": 0.0,
+                    "daily_consumed": 0.0,   # stored in oz
+                    "last_pour": 0.0,        # stored in oz
                     "last_pour_time": None,
                     "full_weight": float(fw),
                 }
 
+            # Adopt per-message full weight if provided/changed
             if norm["full_weight"] and norm["full_weight"] > 0 and norm["full_weight"] != info["full_weight"]:
                 info["full_weight"] = float(norm["full_weight"])
 
             prev_weight = info["last_weight"]
             info["last_weight"] = weight
 
+            # Pour detection (kg diff), then convert to oz for storage
             if prev_weight - weight > pour_threshold:
-                pour_amt = round(prev_weight - weight, 2)
-                pour_amt_oz = round(pour_amt * KG_TO_OZ, 1)
+                pour_amt_kg = round(prev_weight - weight, 2)
+                pour_amt_oz = round(pour_amt_kg * KG_TO_OZ, 1)
                 info["last_pour"] = pour_amt_oz
-                info["last_pour_time"] = datetime.now()
+                info["last_pour_time"] = datetime.now(timezone.utc)
                 info["daily_consumed"] += pour_amt_oz
 
                 state["history"].append({
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z"),
                     "keg": keg_id,
                     "pour_oz": pour_amt_oz,
-                    "weight_before": round(prev_weight, 2),
-                    "weight_after": round(weight, 2),
-                    "temperature": temp,
+                    "weight_before_kg": round(prev_weight, 2),
+                    "weight_after_kg": round(weight, 2),
+                    "temperature_c": temp,
                 })
                 if len(state["history"]) > MAX_LOG_ENTRIES:
                     state["history"].pop(0)
                 await store.async_save(state["history"][-MAX_LOG_ENTRIES:])
                 _LOGGER.debug("beer_keg: pour %.1f oz on %s", pour_amt_oz, keg_id)
 
-            fw = info["full_weight"]; ew = empty_weight
+            # Fill %
+            fw = info["full_weight"]; ew = state["empty_weight"]
             fill_pct = max(0.0, min(100.0, ((weight - ew) / (fw - ew) * 100.0))) if fw > ew else 0.0
 
             state["data"][keg_id] = {
                 "id": keg_id,
                 "name": norm["name"],
-                "weight": round(weight, 2),
+                "weight": round(weight, 2),  # kg (current device reading)
                 "temperature": round(temp, 1) if temp is not None else None,
-                "full_weight": round(fw, 2),
-                "daily_consumed": round(info["daily_consumed"], 1),
-                "last_pour": round(info["last_pour"], 1),
+                "full_weight": round(fw, 2),  # kg (capacity)
+                "daily_consumed": round(info["daily_consumed"], 1),  # oz
+                "last_pour": round(info["last_pour"], 1),            # oz
                 "fill_percent": round(fill_pct, 1),
             }
+            state[LAST_UPDATE_KEY] = datetime.now(timezone.utc)
             hass.bus.async_fire(f"{DOMAIN}_update", {"keg_id": keg_id})
-
-        # ----- REST discovery -----
-        keg_list = await fetch_kegs()
-        for raw in keg_list:
-            norm = _normalize_keg_dict(raw)
-            await _publish_keg(norm)
-        if not keg_list:
-            _LOGGER.warning("beer_keg: No kegs found via REST API")
 
         # ----- WebSocket listener -----
         async def connect_websocket():
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession() as http:
                 while True:
                     try:
-                        _LOGGER.info("beer_keg: Connecting to %s", ws_url)
-                        async with session.ws_connect(ws_url) as ws:
+                        _LOGGER.info("beer_keg: Connecting WS -> %s", ws_url)
+                        async with http.ws_connect(ws_url) as ws:
                             _LOGGER.info("beer_keg: Connected to WS")
+
+                            async def _pinger():
+                                while True:
+                                    try:
+                                        await ws.ping()
+                                    except Exception:
+                                        break
+                                    await asyncio.sleep(WS_PING_SEC)
+
+                            hass.async_create_task(_pinger())
+
                             async for msg in ws:
                                 if msg.type != aiohttp.WSMsgType.TEXT:
                                     continue
@@ -217,8 +240,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 except json.JSONDecodeError:
                                     continue
 
-                                kegs = data.get("kegs")
-                                source = kegs if isinstance(kegs, list) else data if isinstance(data, list) else None
+                                # Accept either {"kegs":[...]} or [...]
+                                if isinstance(data, list):
+                                    source = data
+                                else:
+                                    kegs = data.get("kegs")
+                                    source = kegs if isinstance(kegs, list) else None
                                 if not source:
                                     continue
 
@@ -229,6 +256,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.error("beer_keg: WS error: %s", e)
                         await asyncio.sleep(10)
 
+        # ----- REST polling fallback -----
         async def rest_poll(now=None):
             try:
                 new_kegs = await fetch_kegs()
@@ -240,18 +268,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except Exception as e:
                 _LOGGER.debug("beer_keg: REST poll error: %s", e)
 
-        async_track_time_interval(hass, rest_poll, timedelta(seconds=10))
+        # ----- Watchdog if stale -----
+        async def watchdog(now=None):
+            ts = state.get(LAST_UPDATE_KEY)
+            if ts is None:
+                return  # no data yet since startup
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age > DATA_STALE_SEC:
+                _LOGGER.warning("beer_keg: no updates for %.0fs, forcing REST poll", age)
+                try:
+                    new_kegs = await fetch_kegs()
+                    for raw in new_kegs:
+                        norm = _normalize_keg_dict(raw)
+                        await _publish_keg(norm)
+                except Exception as e:
+                    _LOGGER.error("beer_keg: watchdog REST poll failed: %s", e)
 
-        async def reset_daily(now=None):
-            for keg_id, info in state["kegs"].items():
-                info["daily_consumed"] = 0.0
-                if keg_id in state["data"]:
-                    state["data"][keg_id]["daily_consumed"] = 0.0
-                    hass.bus.async_fire(f"{DOMAIN}_update", {"keg_id": keg_id})
-            _LOGGER.info("beer_keg: Daily reset complete")
-
-        async_track_time_interval(hass, reset_daily, timedelta(days=1))
-
+        # ----- Services -----
         async def export_history(call: ServiceCall):
             path = hass.config.path("www/beer_keg_history.json")
 
@@ -282,10 +315,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await store.async_save(state["history"][-MAX_LOG_ENTRIES:])
 
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, on_stop)
-        hass.async_create_task(connect_websocket())
-        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-        _LOGGER.info("beer_keg: setup complete (REST + WS + oz units)")
+        # ----- Start after HA is fully running -----
+        async def _start_after_homeassistant_started(event=None):
+            # 1) load platforms first so entities exist
+            await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+            # 2) initial REST refresh
+            try:
+                new_kegs = await fetch_kegs()
+                for raw in new_kegs:
+                    norm = _normalize_keg_dict(raw)
+                    await _publish_keg(norm)
+                _LOGGER.info("beer_keg: Initial REST refresh found %d kegs", len(new_kegs))
+            except Exception as e:
+                _LOGGER.warning("beer_keg: Initial REST refresh failed: %s", e)
+
+            # 3) start loops
+            hass.async_create_task(connect_websocket())
+            async_track_time_interval(hass, rest_poll, timedelta(seconds=REST_POLL_SECONDS))
+            async_track_time_interval(hass, watchdog, timedelta(seconds=10))
+            _LOGGER.info("beer_keg: started background tasks")
+
+        if hass.state == "RUNNING":
+            hass.async_create_task(_start_after_homeassistant_started())
+        else:
+            hass.bus.async_listen_once("homeassistant_started", _start_after_homeassistant_started)
+
+        _LOGGER.info("beer_keg: setup complete (REST + WS + poll + watchdog + oz)")
         return True
 
     except Exception as e:
