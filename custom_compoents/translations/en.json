@@ -14,17 +14,19 @@
     },
     "abort": {
       "already_configured": "This server is already configured"
-    },
-    "options": {
-      "step": {
-        "init": {
-          "title": "Beer Keg Options",
-          "data": {
-            "empty_weight": "Empty keg weight (kg)",
-            "default_full_weight": "Default full weight (kg)",
-            "pour_threshold": "Pour threshold (kg)",
-            "per_keg_full": "Per-keg full weights JSON (id->kg)"
-          }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Beer Keg Options",
+        "data": {
+          "empty_weight": "Empty keg weight (kg)",
+          "default_full_weight": "Default full weight (kg)",
+          "pour_threshold": "Pour threshold (kg)",
+          "per_keg_full": "Per-keg full weights JSON (id->kg)",
+          "full_volume_liters": "Full volume (L)",
+          "beer_specific_gravity": "Beer specific gravity (SG)"
         }
       }
     }
