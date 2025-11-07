@@ -6,6 +6,8 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List
+from .const import DOMAIN
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 import aiohttp
 from urllib.parse import urlparse, urlunparse
@@ -16,6 +18,8 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.components.persistent_notification import async_create as pn_create
 from homeassistant.helpers.storage import Store
+import voluptuous as vol
+from homeassistant.helpers import config_validation as cv
 
 from .const import (
     DOMAIN,
