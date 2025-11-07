@@ -1,15 +1,21 @@
-name: Validate with hassfest
+name: Validate with hassfest & HACS
 on:
   push:
     paths:
       - "custom_components/**"
       - ".github/workflows/hassfest.yml"
   pull_request:
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: home-assistant/actions/hassfest@master
--name: HACS Action
-uses: hacs/action@22.5.0
+
+      # Validate manifest + translations + config structure
+      - name: Hassfest validation
+        uses: home-assistant/actions/hassfest@master
+
+      # Validate HACS metadata (hacs.json)
+      - name: HACS validation
+        uses: hacs/action@22.5.0
