@@ -2,7 +2,7 @@ name: Validate with hassfest
 on:
   push:
     paths:
-      - "custom_components/**"
+      - "custom_components/beer_keg_ha/**"
       - ".github/workflows/hassfest.yml"
   pull_request:
 jobs:
