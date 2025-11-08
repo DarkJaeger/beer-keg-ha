@@ -20,7 +20,6 @@ from homeassistant.helpers.storage import Store
 
 from .const import (
     DOMAIN,
-    # base options
     CONF_WS_URL,
     CONF_EMPTY_WEIGHT,
     CONF_DEFAULT_FULL_WEIGHT,
@@ -30,17 +29,12 @@ from .const import (
     DEFAULT_EMPTY_WEIGHT,
     DEFAULT_FULL_WEIGHT,
     DEFAULT_POUR_THRESHOLD,
-    # optional density-aware keys (present if you added them to const.py)
-    # they are imported conditionally below
 )
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = ["sensor"]
-
-# hassfest requirement since we implement async_setup
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-# Behavior constants
 KG_TO_OZ = 35.274
 REST_POLL_SECONDS = 10
 WS_PING_SEC = 30
@@ -57,7 +51,7 @@ try:
         WATER_DENSITY_KG_PER_L,
     )
     DENSITY_AWARE = True
-except Exception:  # const does not have density keys
+except Exception:
     DENSITY_AWARE = False
     CONF_FULL_VOLUME_L = "full_volume_liters"
     CONF_BEER_SG = "beer_specific_gravity"
@@ -74,7 +68,6 @@ def _coerce_float(val, default=0.0):
 
 
 def _normalize_keg_dict(keg: dict) -> dict:
-    """Normalize keg data from REST or WebSocket payloads."""
     keg_id = str(keg.get("id", "unknown")).lower().replace(" ", "_")
     weight = _coerce_float(keg.get("weight"))
     temp = keg.get("temperature")
@@ -108,17 +101,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         default_full = float(opts.get(CONF_DEFAULT_FULL_WEIGHT, DEFAULT_FULL_WEIGHT))
         pour_threshold = float(opts.get(CONF_POUR_THRESHOLD, DEFAULT_POUR_THRESHOLD))
 
-        # Optional density-aware computation for effective full_weight
         if DENSITY_AWARE:
             full_volume_l = float(opts.get(CONF_FULL_VOLUME_L, DEFAULT_FULL_VOLUME_L))
             beer_sg = float(opts.get(CONF_BEER_SG, DEFAULT_BEER_SG))
-            computed_full_from_sg = full_volume_l * beer_sg * WATER_DENSITY_KG_PER_L  # kg
+            computed_full_from_sg = full_volume_l * beer_sg * WATER_DENSITY_KG_PER_L
         else:
             full_volume_l = DEFAULT_FULL_VOLUME_L
             beer_sg = DEFAULT_BEER_SG
             computed_full_from_sg = None
 
-        # Per-keg full weight overrides (JSON map id->kg)
         per_keg_full: Dict[str, float] = {}
         raw_mapping = opts.get(CONF_PER_KEG_FULL)
         if raw_mapping:
@@ -141,15 +132,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "per_keg_full": per_keg_full,
             "full_volume_l": full_volume_l,
             "beer_sg": beer_sg,
-            "computed_full_from_sg": computed_full_from_sg,  # may be None
-            "kegs": {},          # runtime per-keg (last_weight, last_pour, etc.)
-            "data": {},          # values exposed to sensor.py
+            "computed_full_from_sg": computed_full_from_sg,
+            "kegs": {},
+            "data": {},
             "history": [],
             "store": store,
             LAST_UPDATE_KEY: None,
         }
 
-        # Load history
         loaded = await store.async_load()
         if isinstance(loaded, list):
             state["history"] = loaded
@@ -157,7 +147,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # ---------- REST helper
         async def fetch_kegs() -> List[Dict[str, Any]]:
-            """Fetch /api/kegs. Accepts list[...] or dict{'kegs':[...]}."""
             try:
                 u = urlparse(ws_url)
                 scheme = "http" if u.scheme == "ws" else "https" if u.scheme == "wss" else "http"
@@ -187,19 +176,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error("%s: fetch_kegs error (outer): %s", DOMAIN, e)
                 return []
 
-        # ---------- Core publisher
+        # ---------- Publisher
         async def _publish_keg(norm: dict):
             keg_id = norm["keg_id"]
-            weight = norm["weight"]              # kg (net if you tared)
+            weight = norm["weight"]
             temp = norm["temperature"]
 
             info = state["kegs"].get(keg_id)
             if not info:
-                # Full weight selection priority:
-                # 1) device-reported per message
-                # 2) per-keg override
-                # 3) computed by Volume×SG×WaterDensity (if available)
-                # 4) default_full
                 initial_fw = (
                     norm["full_weight"]
                     or state["per_keg_full"].get(keg_id)
@@ -208,20 +192,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 info = state["kegs"][keg_id] = {
                     "last_weight": weight,
-                    "daily_consumed": 0.0,   # oz
-                    "last_pour": 0.0,        # oz
+                    "daily_consumed": 0.0,
+                    "last_pour": 0.0,
                     "last_pour_time": None,
                     "full_weight": float(initial_fw) if initial_fw else float(state["default_full"]),
                 }
 
-            # If device later reports a full_weight, adopt it
             if norm["full_weight"] and norm["full_weight"] > 0 and norm["full_weight"] != info["full_weight"]:
                 info["full_weight"] = float(norm["full_weight"])
 
             prev_weight = info["last_weight"]
             info["last_weight"] = weight
 
-            # Pour detection (kg) → store in oz
             if prev_weight - weight > state["pour_threshold"]:
                 delta_kg = round(prev_weight - weight, 2)
                 delta_oz = round(delta_kg * KG_TO_OZ, 1)
@@ -241,14 +223,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     state["history"].pop(0)
                 await state["store"].async_save(state["history"][-MAX_LOG_ENTRIES:])
 
-            # Fill %
             fw = (
                 info.get("full_weight")
                 or state["per_keg_full"].get(keg_id)
                 or state["computed_full_from_sg"]
                 or state["default_full"]
             )
-            ew = state["empty_weight"]  # set to 0 if you tare with empty keg
+            ew = state["empty_weight"]
             w = max(0.0, weight)
             if fw and fw > ew:
                 fill_pct = ((w - ew) / (fw - ew)) * 100.0
@@ -259,11 +240,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             state["data"][keg_id] = {
                 "id": keg_id,
                 "name": norm["name"],
-                "weight": round(weight, 2),                   # kg (raw)
+                "weight": round(weight, 2),
                 "temperature": round(temp, 1) if temp is not None else None,
                 "full_weight": round(float(fw), 2) if fw else None,
-                "daily_consumed": round(info["daily_consumed"], 1),  # oz
-                "last_pour": round(info["last_pour"], 1),            # oz
+                "daily_consumed": round(info["daily_consumed"], 1),
+                "last_pour": round(info["last_pour"], 1),
                 "fill_percent": round(fill_pct, 1),
             }
             state[LAST_UPDATE_KEY] = datetime.now(timezone.utc)
@@ -296,7 +277,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 except json.JSONDecodeError:
                                     continue
 
-                                # Accept either {"kegs":[...]} or [...]
                                 if isinstance(data, list):
                                     source = data
                                 else:
@@ -312,7 +292,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.error("%s: WS error: %s", DOMAIN, e)
                         await asyncio.sleep(10)
 
-        # ---------- Polling + Watchdog
+        # ---------- REST polling (ADDED)
         async def rest_poll(now=None):
             try:
                 new_kegs = await fetch_kegs()
@@ -322,20 +302,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except Exception as e:
                 _LOGGER.debug("%s: REST poll error: %s", DOMAIN, e)
 
+        # ---------- Watchdog
         async def watchdog(now=None):
             ts = state.get(LAST_UPDATE_KEY)
             if ts is None:
                 return
             age = (datetime.now(timezone.utc) - ts).total_seconds()
             if age > DATA_STALE_SEC:
-                _LOGGER.warning("%s: no updates for %.0fs, forcing REST poll", DOMAIN, age)
+                _LOGGER.warning("%s: no updates for %.0fs, forcing REST poll + republish", DOMAIN, age)
                 try:
                     new_kegs = await fetch_kegs()
-                    for raw in new_kegs:
-                        norm = _normalize_keg_dict(raw)
-                        await _publish_keg(norm)
+                    if new_kegs:
+                        for raw in new_kegs:
+                            norm = _normalize_keg_dict(raw)
+                            await _publish_keg(norm)
+                    else:
+                        for keg_id in list(state.get("data", {}).keys()):
+                            hass.bus.async_fire(f"{DOMAIN}_update", {"keg_id": keg_id})
                 except Exception as e:
                     _LOGGER.error("%s: watchdog REST poll failed: %s", DOMAIN, e)
+                    for keg_id in list(state.get("data", {}).keys()):
+                        hass.bus.async_fire(f"{DOMAIN}_update", {"keg_id": keg_id})
 
         # ---------- Services
         async def export_history(call: ServiceCall):
@@ -361,6 +348,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await _publish_keg(norm)
             pn_create(hass, f"Refreshed {len(new_kegs)} kegs", title="Beer Keg Refresh")
         hass.services.async_register(DOMAIN, "refresh_kegs", refresh_kegs)
+
+        async def republish_all(call: ServiceCall):
+            data = state.get("data", {})
+            for keg_id in data.keys():
+                hass.bus.async_fire(f"{DOMAIN}_update", {"keg_id": keg_id})
+            pn_create(hass, f"Republished {len(data)} kegs", title="Beer Keg Republish")
+        hass.services.async_register(DOMAIN, "republish_all", republish_all)
 
         async def on_stop(event):
             await state["store"].async_save(state["history"][-MAX_LOG_ENTRIES:])

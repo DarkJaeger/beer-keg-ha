@@ -1,11 +1,13 @@
 from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Set
+
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
+
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,6 +36,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         async_add_entities(ents, True)
         created.add(keg_id)
 
+    # create sensors for any kegs already known
     for keg_id in list(state.get("data", {}).keys()):
         create_for(keg_id)
 
@@ -42,6 +45,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         keg_id = (event.data or {}).get("keg_id")
         if keg_id:
             create_for(keg_id)
+
     entry.async_on_unload(hass.bus.async_listen(PLATFORM_EVENT, _on_update))
 
 class KegSensor(SensorEntity):
@@ -66,7 +70,7 @@ class KegSensor(SensorEntity):
             identifiers={(DOMAIN, f"{self.entry.entry_id}_{self.keg_id}")},
             name=f"Beer Keg {self.keg_id}",
             manufacturer="Beer Keg",
-            model="WebSocket + REST"
+            model="WebSocket + REST",
         )
 
     @property
@@ -76,8 +80,13 @@ class KegSensor(SensorEntity):
         return data.get(self.keg_id, {}).get(meta["key"])
 
     async def async_added_to_hass(self) -> None:
+        # Ensure handler runs in the event loop
         self.async_on_remove(self.hass.bus.async_listen(PLATFORM_EVENT, self._refresh_if_mine))
 
+    @callback
     def _refresh_if_mine(self, event) -> None:
         if (event.data or {}).get("keg_id") == self.keg_id:
+            # This runs on the loop; safe to call:
             self.async_write_ha_state()
+            # If you want extra safety across threads, you could use:
+            # self.schedule_update_ha_state()
