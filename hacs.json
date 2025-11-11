@@ -2,6 +2,5 @@
   "name": "Beer Keg Scale",
   "render_readme": true,
   "homeassistant": "2024.6.0",
-  "zip_release": true,
-  "filename": "beer-keg-ha-v1.2.0.zip"
+  "zip_release": false,
 }
