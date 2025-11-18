@@ -29,6 +29,18 @@ from .const import (
     DEFAULT_FULL_WEIGHT,
     DEFAULT_POUR_THRESHOLD,
 )
+# Helper entities for unit selection
+WEIGHT_UNIT_ENTITIES = [
+    "select.keg_weight_unit",
+    "input_select.keg_weight_unit",
+]
+
+TEMP_UNIT_ENTITIES = [
+    "select.keg_temperature_unit",
+    "select.keg_temp_unit",
+    "input_select.keg_temp_unit",
+]
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -178,12 +190,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if isinstance(prefs, dict):
             du = prefs.get("display_units")
             if isinstance(du, dict):
-                weight_unit = du.get("weight")
-                temp_unit = du.get("temp")
-                if weight_unit in ("kg", "lb"):
-                    state["display_units"]["weight"] = weight_unit
-                if temp_unit in ("°C", "°F"):
-                    state["display_units"]["temp"] = temp_unit
+                w = du.get("weight")
+                t = du.get("temp")
+                if w in ("kg", "lb"):
+                    state["display_units"]["weight"] = w
+                if t in ("°C", "°F"):
+                    state["display_units"]["temp"] = t
 
         # ---------- REST helpers
 
@@ -419,6 +431,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # ---------- Services
 
+               
         async def export_history(call: ServiceCall) -> None:
             path = hass.config.path("www/beer_keg_history.json")
 
@@ -460,24 +473,61 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.services.async_register(DOMAIN, "refresh_devices", refresh_devices)
 
         async def calibrate_keg(call: ServiceCall) -> None:
-            """Service wrapper to POST /api/kegs/calibrate."""
+            """
+            Read the selected keg + calibration values from HA entities
+            and POST /api/kegs/calibrate.
+            """
+
             base = _rest_base_from_ws(state["ws_url"])
             url = f"{base}/api/kegs/calibrate"
+
+            # 1) Selected keg id
+            dev_state = hass.states.get("select.keg_device")
+            if not dev_state or dev_state.state in ("unknown", "unavailable", ""):
+                pn_create(hass, "No keg selected.", title="Beer Keg Calibration")
+                return
+
+            keg_id = dev_state.state
+
+            # 2) Keg name (optional, fallback to id)
+            name_state = hass.states.get("input_text.beer_keg_name")
+            if name_state and name_state.state not in ("unknown", "unavailable", ""):
+                keg_name = name_state.state
+            else:
+                keg_name = keg_id
+
+            # 3) Helper to safely read floats from number entities
+            def _get_float(ent_id: str, default: float = 0.0) -> float:
+                ent = hass.states.get(ent_id)
+                if not ent:
+                    return default
+                try:
+                    return float(ent.state)
+                except (TypeError, ValueError):
+                    return default
+
+            full_weight = _get_float("input_number.keg_cfg_full_weight_kg")
+            weight_cal = _get_float("input_number.keg_cfg_weight_cal")
+            temp_cal = _get_float("input_number.keg_cfg_temp_cal_c")
+
             payload = {
-                "id": call.data.get("id"),
-                "name": call.data.get("name"),
-                "full_weight": float(call.data.get("full_weight")),
-                "weight_calibrate": float(call.data.get("weight_calibrate")),
-                "temperature_calibrate": float(call.data.get("temperature_calibrate")),
+                "id": keg_id,
+                "name": keg_name,
+                "full_weight": full_weight,
+                "weight_calibrate": weight_cal,
+                "temperature_calibrate": temp_cal,
             }
+
             try:
                 async with aiohttp.ClientSession() as http_sess:
                     async with http_sess.post(url, json=payload) as resp:
                         body = await resp.text()
                         if resp.status not in (200, 201):
                             raise RuntimeError(f"HTTP {resp.status}: {body[:200]}")
+
                 pn_create(hass, "Calibration saved.", title="Beer Keg")
                 await refresh_kegs(ServiceCall(DOMAIN, "refresh_kegs", {}))
+
             except Exception as e:
                 _LOGGER.error("%s: calibrate_keg failed: %s", DOMAIN, e)
                 pn_create(hass, f"Calibration failed: {e}", title="Beer Keg")
@@ -485,34 +535,109 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.services.async_register(DOMAIN, "calibrate_keg", calibrate_keg)
 
         async def set_display_units(call: ServiceCall) -> None:
-            """Service to change weight/temperature display units and persist them."""
-            weight_unit = call.data.get("weight_unit") or state["display_units"].get("weight", "kg")
-            temp_unit = call.data.get("temp_unit") or state["display_units"].get("temp", "°C")
+            """
+            Service to change weight/temperature display units and persist them.
 
+            Priority:
+            1) weight_unit / temp_unit from service data (if provided and valid)
+            2) Current state of our unit helper entities (select/input_select)
+            3) Existing stored prefs (state["display_units"])
+            """
+
+            # 1) From service call data (may be literal Jinja from Lovelace)
+            weight_unit = call.data.get("weight_unit")
+            temp_unit = call.data.get("temp_unit")
+
+            # If they look like templates from Lovelace (e.g. "{{ states('...') }}"),
+            # treat them as not provided so we fall back to helpers.
+            if isinstance(weight_unit, str) and "{{" in weight_unit:
+                weight_unit = None
+            if isinstance(temp_unit, str) and "{{" in temp_unit:
+                temp_unit = None
+
+            # 2) If missing, read from helper entities in order
+            if weight_unit is None:
+                for ent_id in WEIGHT_UNIT_ENTITIES:
+                    ent = hass.states.get(ent_id)
+                    if ent and ent.state in ("kg", "lb"):
+                        weight_unit = ent.state
+                        break
+
+            if temp_unit is None:
+                for ent_id in TEMP_UNIT_ENTITIES:
+                    ent = hass.states.get(ent_id)
+                    if ent and ent.state in ("°C", "°F"):
+                        temp_unit = ent.state
+                        break
+
+            # 3) Fallback to existing prefs if still invalid
             if weight_unit not in ("kg", "lb"):
-                weight_unit = "kg"
+                weight_unit = state["display_units"].get("weight", "kg")
             if temp_unit not in ("°C", "°F"):
-                temp_unit = "°C"
+                temp_unit = state["display_units"].get("temp", "°C")
 
+            # Save in memory
             state["display_units"] = {"weight": weight_unit, "temp": temp_unit}
 
-            # Persist to prefs store so it survives reboot
-            await state["prefs_store"].async_save({"display_units": state["display_units"]})
+            # Persist so it survives reboot
+            await state["prefs_store"].async_save(
+                {"display_units": state["display_units"]}
+            )
 
-            # broadcast updates so sensor.py / selects / cards can react
+            # Fire updates so sensors recalc value + unit
             for keg_id in list(state.get("data", {}).keys()):
                 hass.bus.async_fire(f"{DOMAIN}_update", {"keg_id": keg_id})
 
-            pn_create(hass, f"Display units set to {weight_unit}, {temp_unit}", title="Beer Keg")
+            pn_create(
+                hass,
+                f"Display units set to {weight_unit}, {temp_unit}",
+                title="Beer Keg",
+            )
+
 
         hass.services.async_register(DOMAIN, "set_display_units", set_display_units)
-
+        
         async def on_stop(event) -> None:
-            # Save both history and prefs on shutdown
+            """Save both history and prefs on shutdown."""
             await state["history_store"].async_save(state["history"][-MAX_LOG_ENTRIES:])
             await state["prefs_store"].async_save({"display_units": state["display_units"]})
-
+            
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, on_stop)
+
+        # ---------- Start after HA is running
+
+        async def _start_after_started(event=None) -> None:
+            # create entities for platforms
+            await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+            try:
+                await fetch_devices()
+                initial = await fetch_kegs()
+                for raw in initial:
+                    norm = _normalize_keg_dict(raw)
+                    await _publish_keg(norm)
+                _LOGGER.info("%s: Initial REST refresh found %d kegs", DOMAIN, len(initial))
+            except Exception as e:
+                _LOGGER.warning("%s: Initial refresh failed: %s", DOMAIN, e)
+
+            hass.async_create_task(connect_websocket())
+            async_track_time_interval(hass, rest_poll, timedelta(seconds=REST_POLL_SECONDS))
+            async_track_time_interval(hass, watchdog, timedelta(seconds=10))
+            async_track_time_interval(hass, _periodic_devices, timedelta(seconds=DEVICES_REFRESH_SEC))
+            _LOGGER.info("%s: started background tasks", DOMAIN)
+
+        if hass.state == "RUNNING":
+            hass.async_create_task(_start_after_started())
+        else:
+            hass.bus.async_listen_once("homeassistant_started", _start_after_started)
+
+        _LOGGER.info("%s: setup complete (WS+REST+poll+watchdog+devices+services)", DOMAIN)
+        return True
+
+    except Exception as e:
+        _LOGGER.exception("%s: setup_entry crashed: %s", DOMAIN, e)
+        return False
+
 
         # ---------- Start after HA is running
 
