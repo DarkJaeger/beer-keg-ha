@@ -8,6 +8,7 @@ from homeassistant.components.number import (
     NumberMode,
 )
 from homeassistant.config_entries import ConfigEntry
+    # noqa: E402
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -42,6 +43,24 @@ NUMBER_TYPES = {
         "min": -10.0,
         "max": 10.0,
         "step": 0.1,
+        "mode": NumberMode.BOX,
+    },
+    # NEW: per-keg Beer SG (current / target gravity)
+    "beer_sg": {
+        "name": "Beer SG",
+        "key": "beer_sg",
+        "min": 0.9,
+        "max": 1.2,
+        "step": 0.001,
+        "mode": NumberMode.BOX,
+    },
+    # NEW: per-keg Original Gravity (OG)
+    "original_gravity": {
+        "name": "Original Gravity",
+        "key": "original_gravity",
+        "min": 0.9,
+        "max": 1.2,
+        "step": 0.001,
         "mode": NumberMode.BOX,
     },
 }
@@ -210,9 +229,18 @@ class BeerKegNumberEntity(NumberEntity):
         self._attr_native_min_value = meta["min"]
         self._attr_native_max_value = meta["max"]
         self._attr_native_step = meta["step"]
-        self._attr_native_unit_of_measurement = (
-            "kg" if self._key in ("full_weight", "weight_calibrate") else "°C"
-        )
+
+        # Units:
+        #  - full_weight / weight_calibrate: kg
+        #  - temperature_calibrate: °C
+        #  - beer_sg / original_gravity: unitless
+        if self._key in ("full_weight", "weight_calibrate"):
+            self._attr_native_unit_of_measurement = "kg"
+        elif self._key == "temperature_calibrate":
+            self._attr_native_unit_of_measurement = "°C"
+        else:
+            # beer_sg / original_gravity = no units
+            self._attr_native_unit_of_measurement = None
 
     @property
     def device_info(self) -> DeviceInfo:

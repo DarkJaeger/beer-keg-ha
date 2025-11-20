@@ -48,7 +48,7 @@ VOLUME_UNIT_ENTITIES = [
 _LOGGER = logging.getLogger(__name__)
 
 # Platforms we load
-PLATFORMS = ["sensor", "select", "number", "text"]
+PLATFORMS = ["sensor", "select", "number", "text", "date"]
 
 # hassfest requirement
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -380,11 +380,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 fill_pct = 0.0
             fill_pct = max(0.0, min(100.0, fill_pct))
 
-            # Store raw values in kg/°C for sensors; *weight* is now the smoothed value
+            # Store raw values in kg/°C; sensor.py handles display units if needed.
+            # IMPORTANT: merge into any existing dict so we don't wipe out
+            # per-keg config fields like beer_sg / original_gravity.
+            existing = state["data"].get(keg_id, {})
+
             state["data"][keg_id] = {
+                **existing,  # preserve things like beer_sg, original_gravity, etc.
                 "id": keg_id,
                 "name": norm["name"],
-                "weight": round(display_weight, 2),
+                "weight": round(weight, 2),  # or display_weight if you're using smoothing
                 "temperature": round(temp, 1) if temp is not None else None,
                 "full_weight": round(float(fw), 2) if fw else None,
                 "weight_calibrate": norm.get("weight_calibrate"),
