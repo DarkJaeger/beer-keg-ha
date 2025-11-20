@@ -129,6 +129,11 @@ SENSOR_TYPES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+def short_id(keg_id: str, length: int = 4) -> str:
+    """Return a shortened keg ID for entity naming."""
+    if not keg_id:
+        return "unknown"
+    return keg_id[:length]
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -186,8 +191,10 @@ class KegSensor(SensorEntity):
         self._state_ref: Dict[str, Any] = hass.data[DOMAIN][entry.entry_id]
         self._meta = SENSOR_TYPES[sensor_type]
 
-        self._attr_name = f"Keg {keg_id} {self._meta['name']}"
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_{keg_id}_{sensor_type}"
+        short = short_id(keg_id)
+
+        self._attr_name = f"Keg {short} {self._meta['name']}"
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_{short}_{sensor_type}"
         self._attr_icon = self._meta.get("icon")
         self._attr_device_class = self._meta.get("device_class")
         self._attr_state_class = self._meta.get("state_class")

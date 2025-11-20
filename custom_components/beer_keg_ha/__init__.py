@@ -48,7 +48,7 @@ VOLUME_UNIT_ENTITIES = [
 _LOGGER = logging.getLogger(__name__)
 
 # Platforms we load
-PLATFORMS = ["sensor", "select", "number"]
+PLATFORMS = ["sensor", "select", "number", "text"]
 
 # hassfest requirement
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -176,11 +176,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "temp": "°C",
                 "volume": "oz",   # NEW: base volume unit
             },
+            # NEW: smoothing config (global, but adjustable via Number entities)
+            "noise_deadband_kg": float(opts.get("noise_deadband_kg", 0.05)),
+            "smoothing_alpha": float(opts.get("smoothing_alpha", 0.3)),
             "history_store": history_store,
             "prefs_store": prefs_store,
             LAST_UPDATE_KEY: None,
-        }
-
+        }       
         hass.data[DOMAIN][entry.entry_id] = state
 
         # ---- load history from storage
@@ -258,10 +260,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return state.setdefault("devices", [])
 
         # ---------- publisher
-
+        
         async def _publish_keg(norm: dict) -> None:
+            """Normalize and push one keg's data into integration state."""
             keg_id = norm["keg_id"]
-            weight = norm["weight"]
+            weight_raw = norm["weight"]          # raw kg from device
             temp = norm["temperature"]
 
             info = state["kegs"].get(keg_id)
@@ -278,53 +281,91 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     or state["default_full"]
                 )
                 info = state["kegs"][keg_id] = {
-                    "last_weight": weight,
+                    # we now track both raw & filtered weight
+                    "last_weight_raw": weight_raw,
+                    "last_weight": weight_raw,
                     "daily_consumed": 0.0,   # oz
                     "last_pour": 0.0,        # oz
                     "last_pour_time": None,
                     "full_weight": float(initial_fw) if initial_fw else float(state["default_full"]),
+                    "recent_weights": [],    # for median filter
                 }
 
-            # If device later reports a full_weight, adopt it
-            if norm["full_weight"] and norm["full_weight"] > 0 and norm["full_weight"] != info["full_weight"]:
-                info["full_weight"] = float(norm["full_weight"])
+            # --- Pour detection based on RAW readings ---
+            prev_weight_raw = info.get("last_weight_raw", weight_raw)
+            raw_delta = prev_weight_raw - weight_raw
+            pour_threshold = state.get("pour_threshold", DEFAULT_POUR_THRESHOLD)
 
-            prev_weight = info["last_weight"]
-            info["last_weight"] = weight
+            is_pour = raw_delta > pour_threshold
 
-            # Pour detection (kg -> store oz + ml)
-            if prev_weight - weight > state["pour_threshold"]:
-            delta_kg = round(prev_weight - weight, 2)
-            delta_oz = round(delta_kg * KG_TO_OZ, 1)
+            # store raw for next loop
+            info["last_weight_raw"] = weight_raw
 
-            # Convert oz -> ml (1 fl oz = 29.5735 ml)
-            delta_ml = int(round(delta_oz * 29.5735))
+            # --- Noise filtering for DISPLAY weight (only when NOT pouring) ---
+            display_weight = weight_raw
+            if not is_pour:
+                # short history for median filter
+                recent = info.setdefault("recent_weights", [])
+                recent.append(weight_raw)
+                if len(recent) > 5:
+                    recent.pop(0)
 
-            # Existing oz behaviour
-            info["last_pour"] = delta_oz
-            info["last_pour_time"] = datetime.now(timezone.utc)
-            info["daily_consumed"] += delta_oz
+                sorted_recent = sorted(recent)
+                median_kg = sorted_recent[len(sorted_recent) // 2]
 
-            # NEW: parallel ml value
-            info["last_pour_ml"] = delta_ml
+                # EMA smoothing
+                alpha = state.get("smoothing_alpha", 0.3)
+                try:
+                    alpha = float(alpha)
+                except (TypeError, ValueError):
+                    alpha = 0.3
+                if not (0.0 < alpha <= 1.0):
+                    alpha = 0.3
 
-            state["history"].append(
-                {
-                    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z"),
-                    "keg": keg_id,
-                    "pour_oz": delta_oz,
-                    "pour_ml": delta_ml,  # optional extra field in history
-                    "weight_before_kg": round(prev_weight, 2),
-                    "weight_after_kg": round(weight, 2),
-                    "temperature_c": temp,
-                }
-            )
-            if len(state["history"]) > MAX_LOG_ENTRIES:
-                state["history"].pop(0)
-            await state["history_store"].async_save(state["history"][-MAX_LOG_ENTRIES:])
+                previous_filtered = info.get("filtered_weight", median_kg)
+                filtered = (alpha * median_kg) + ((1.0 - alpha) * previous_filtered)
 
+                # Deadband – ignore small changes
+                deadband = state.get("noise_deadband_kg", 0.05)
+                try:
+                    deadband = float(deadband)
+                except (TypeError, ValueError):
+                    deadband = 0.05
 
-            # Fill %
+                if abs(filtered - previous_filtered) < deadband:
+                    filtered = previous_filtered
+
+                display_weight = filtered
+                info["filtered_weight"] = filtered
+            else:
+                # During pours, we trust the raw reading to avoid lag
+                info["filtered_weight"] = weight_raw
+
+            info["last_weight"] = display_weight
+
+            # --- Pour stats (use RAW values so real pours are not smoothed away) ---
+            if is_pour:
+                delta_kg = round(raw_delta, 2)
+                delta_oz = round(delta_kg * KG_TO_OZ, 1)
+                info["last_pour"] = delta_oz
+                info["last_pour_time"] = datetime.now(timezone.utc)
+                info["daily_consumed"] += delta_oz
+
+                state["history"].append(
+                    {
+                        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z"),
+                        "keg": keg_id,
+                        "pour_oz": delta_oz,
+                        "weight_before_kg": round(prev_weight_raw, 2),
+                        "weight_after_kg": round(weight_raw, 2),
+                        "temperature_c": temp,
+                    }
+                )
+                if len(state["history"]) > MAX_LOG_ENTRIES:
+                    state["history"].pop(0)
+                await state["history_store"].async_save(state["history"][-MAX_LOG_ENTRIES:])
+
+            # --- Fill % (use DISPLAY weight so compressor noise is smoothed) ---
             fw = (
                 info.get("full_weight")
                 or state["per_keg_full"].get(keg_id)
@@ -332,27 +373,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 or state["default_full"]
             )
             ew = state["empty_weight"]
-            w = max(0.0, weight)
+            w = max(0.0, display_weight)
             if fw and fw > ew:
                 fill_pct = ((w - ew) / (fw - ew)) * 100.0
             else:
                 fill_pct = 0.0
             fill_pct = max(0.0, min(100.0, fill_pct))
 
-            # Store raw values in kg/°C; sensor.py handles display units if needed
+            # Store raw values in kg/°C for sensors; *weight* is now the smoothed value
             state["data"][keg_id] = {
                 "id": keg_id,
                 "name": norm["name"],
-                "weight": round(weight, 2),
+                "weight": round(display_weight, 2),
                 "temperature": round(temp, 1) if temp is not None else None,
                 "full_weight": round(float(fw), 2) if fw else None,
                 "weight_calibrate": norm.get("weight_calibrate"),
                 "temperature_calibrate": norm.get("temperature_calibrate"),
                 "daily_consumed": round(info["daily_consumed"], 1),
                 "last_pour": round(info["last_pour"], 1),
-                "fill_percent": round(fill_pct, 1),
-                # NEW: last pour in ml (may be None before first pour)
-                "last_pour_ml": info.get("last_pour_ml"),
                 "fill_percent": round(fill_pct, 1),
             }
             state[LAST_UPDATE_KEY] = datetime.now(timezone.utc)
@@ -365,6 +403,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.bus.async_fire(DEVICES_UPDATE_EVENT, {"ids": list(state["devices"])})
 
             hass.bus.async_fire(f"{DOMAIN}_update", {"keg_id": keg_id})
+
+        
 
         # ---------- WebSocket loop
 

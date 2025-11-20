@@ -18,10 +18,7 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORM_EVENT = f"{DOMAIN}_update"
 
-# We define 3 number types per keg:
-#  - full_weight_kg
-#  - weight_calibrate
-#  - temp_calibrate_c
+# Per-keg number types
 NUMBER_TYPES = {
     "full_weight_kg": {
         "name": "Full Weight (kg)",
@@ -49,43 +46,140 @@ NUMBER_TYPES = {
     },
 }
 
+# GLOBAL smoothing controls (one per integration entry, not per keg)
+GLOBAL_NUMBER_TYPES = {
+    "noise_deadband_kg": {
+        "name": "Noise Deadband (kg)",
+        "state_key": "noise_deadband_kg",
+        "min": 0.0,
+        "max": 0.5,
+        "step": 0.01,
+        "mode": NumberMode.SLIDER,
+        "default": 0.05,
+    },
+    "smoothing_alpha": {
+        "name": "Smoothing Alpha",
+        "state_key": "smoothing_alpha",
+        "min": 0.05,
+        "max": 1.0,
+        "step": 0.05,
+        "mode": NumberMode.SLIDER,
+        "default": 0.3,
+    },
+}
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up keg calibration numbers from a config entry."""
+    """Set up keg calibration + smoothing numbers from a config entry."""
     state = hass.data[DOMAIN][entry.entry_id]
+
+    entities: List[NumberEntity] = []
+
+    #
+    # 1) Global smoothing sliders (once per integration entry)
+    #
+    for key, meta in GLOBAL_NUMBER_TYPES.items():
+        entities.append(BeerKegGlobalNumberEntity(hass, entry, key, meta))
+
+    #
+    # 2) Per-keg calibration numbers
+    #
     created: Set[str] = state.setdefault("created_number_kegs", set())
 
     def create_for(keg_id: str) -> None:
         if keg_id in created:
             return
 
-        entities: List[BeerKegNumberEntity] = []
         for num_type in NUMBER_TYPES.keys():
-            entities.append(
-                BeerKegNumberEntity(hass, entry, keg_id, num_type)
-            )
+            entities.append(BeerKegNumberEntity(hass, entry, keg_id, num_type))
 
-        async_add_entities(entities, True)
         created.add(keg_id)
 
     # Create numbers for any kegs we already know about
     for keg_id in list(state.get("data", {}).keys()):
         create_for(keg_id)
 
+    async_add_entities(entities, True)
+
     @callback
     def _on_update(event) -> None:
         """Create entities for new kegs when they appear."""
         keg_id = (event.data or {}).get("keg_id")
         if keg_id:
-            create_for(keg_id)
+            # Only create if not already present
+            if keg_id not in created:
+                new_entities: List[NumberEntity] = []
+                for num_type in NUMBER_TYPES.keys():
+                    new_entities.append(
+                        BeerKegNumberEntity(hass, entry, keg_id, num_type)
+                    )
+                created.add(keg_id)
+                async_add_entities(new_entities, True)
 
     entry.async_on_unload(
         hass.bus.async_listen(PLATFORM_EVENT, _on_update)
     )
+
+
+class BeerKegGlobalNumberEntity(NumberEntity):
+    """Global number entities for smoothing settings."""
+
+    _attr_should_poll = False
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        key: str,
+        meta: Dict[str, Any],
+    ) -> None:
+        self.hass = hass
+        self.entry = entry
+        self._state_key = meta["state_key"]
+        self._default = meta["default"]
+
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_global_{key}"
+        self._attr_name = f"Beer Keg {meta['name']}"
+        self._attr_mode = meta["mode"]
+        self._attr_native_min_value = meta["min"]
+        self._attr_native_max_value = meta["max"]
+        self._attr_native_step = meta["step"]
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Group these under a 'Beer Keg Settings' device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, f"{self.entry.entry_id}_settings")},
+            name="Beer Keg Settings",
+            manufacturer="Beer Keg",
+            model="WebSocket + REST",
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        domain_state = self.hass.data[DOMAIN][self.entry.entry_id]
+        val = domain_state.get(self._state_key, self._default)
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return self._default
+
+    async def async_set_native_value(self, value: float) -> None:
+        domain_state = self.hass.data[DOMAIN][self.entry.entry_id]
+        domain_state[self._state_key] = float(value)
+
+        # Nudge all kegs so sensors recalc with new smoothing
+        for keg_id in list(domain_state.get("data", {}).keys()):
+            self.hass.bus.async_fire(
+                f"{DOMAIN}_update",
+                {"keg_id": keg_id},
+            )
+
+        self.async_write_ha_state()
 
 
 class BeerKegNumberEntity(NumberEntity):
@@ -108,20 +202,25 @@ class BeerKegNumberEntity(NumberEntity):
         meta = NUMBER_TYPES[num_type]
         self._key = meta["key"]
 
+        short_id = keg_id[:4]  # cosmetic short ID
+
         self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_{keg_id}_{num_type}"
-        self._attr_name = f"Keg {keg_id} {meta['name']}"
+        self._attr_name = f"Keg {short_id} {meta['name']}"
         self._attr_mode = meta["mode"]
         self._attr_native_min_value = meta["min"]
         self._attr_native_max_value = meta["max"]
         self._attr_native_step = meta["step"]
-        self._attr_native_unit_of_measurement = "kg" if self._key in ("full_weight", "weight_calibrate") else "°C"
+        self._attr_native_unit_of_measurement = (
+            "kg" if self._key in ("full_weight", "weight_calibrate") else "°C"
+        )
 
     @property
     def device_info(self) -> DeviceInfo:
         """Attach these numbers to the keg device."""
+        short_id = self.keg_id[:4]
         return DeviceInfo(
             identifiers={(DOMAIN, f"{self.entry.entry_id}_{self.keg_id}")},
-            name=f"Beer Keg {self.keg_id}",
+            name=f"Beer Keg {short_id}",
             manufacturer="Beer Keg",
             model="WebSocket + REST",
         )
@@ -155,6 +254,7 @@ class BeerKegNumberEntity(NumberEntity):
 
     async def async_added_to_hass(self) -> None:
         """Listen for integration updates and refresh."""
+
         @callback
         def _handle_update(event) -> None:
             if (event.data or {}).get("keg_id") == self.keg_id:
@@ -163,3 +263,4 @@ class BeerKegNumberEntity(NumberEntity):
         self.async_on_remove(
             self.hass.bus.async_listen(PLATFORM_EVENT, _handle_update)
         )
+
