@@ -29,6 +29,9 @@ from .const import (
     DEFAULT_FULL_WEIGHT,
     DEFAULT_POUR_THRESHOLD,
 )
+
+_LOGGER = logging.getLogger(__name__)
+
 # Helper entities for unit selection
 WEIGHT_UNIT_ENTITIES = [
     "select.keg_weight_unit",
@@ -40,12 +43,11 @@ TEMP_UNIT_ENTITIES = [
     "select.keg_temp_unit",
     "input_select.keg_temp_unit",
 ]
-VOLUME_UNIT_ENTITIES = [
+
+POUR_UNIT_ENTITIES = [
     "select.keg_volume_unit",
     "input_select.keg_volume_unit",
 ]
-
-_LOGGER = logging.getLogger(__name__)
 
 # Platforms we load
 PLATFORMS = ["sensor", "select", "number", "text", "date"]
@@ -155,7 +157,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         hass.data.setdefault(DOMAIN, {})
         history_store: Store = Store(hass, 1, f"{DOMAIN}_history")
-        # NEW: store for persistent prefs (display units)
         prefs_store: Store = Store(hass, 1, f"{DOMAIN}_prefs")
 
         state: Dict[str, Any] = {
@@ -171,18 +172,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "data": {},          # values exposed to entities
             "history": [],
             "devices": [],
-            "display_units": {   # default; may be overridden by prefs below
+            "display_units": {   # may be overridden by prefs below
                 "weight": "kg",
                 "temp": "°C",
-                "volume": "oz",   # NEW: base volume unit
+                "pour": "oz",    # base pour unit (oz or ml)
             },
-            # NEW: smoothing config (global, but adjustable via Number entities)
+            # smoothing config (global)
             "noise_deadband_kg": float(opts.get("noise_deadband_kg", 0.05)),
             "smoothing_alpha": float(opts.get("smoothing_alpha", 0.3)),
             "history_store": history_store,
             "prefs_store": prefs_store,
             LAST_UPDATE_KEY: None,
-        }       
+        }
         hass.data[DOMAIN][entry.entry_id] = state
 
         # ---- load history from storage
@@ -198,12 +199,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if isinstance(du, dict):
                 w = du.get("weight")
                 t = du.get("temp")
+                # support both old "volume" and new "pour" key
+                p = du.get("pour") or du.get("volume")
+
                 if w in ("kg", "lb"):
                     state["display_units"]["weight"] = w
                 if t in ("°C", "°F"):
                     state["display_units"]["temp"] = t
-                if v in ("oz", "ml"):
-                    state["display_units"]["volume"] = v    
+                if p in ("oz", "ml"):
+                    state["display_units"]["pour"] = p
 
         # ---------- REST helpers
 
@@ -260,7 +264,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return state.setdefault("devices", [])
 
         # ---------- publisher
-        
+
         async def _publish_keg(norm: dict) -> None:
             """Normalize and push one keg's data into integration state."""
             keg_id = norm["keg_id"]
@@ -281,14 +285,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     or state["default_full"]
                 )
                 info = state["kegs"][keg_id] = {
-                    # we now track both raw & filtered weight
                     "last_weight_raw": weight_raw,
                     "last_weight": weight_raw,
                     "daily_consumed": 0.0,   # oz
                     "last_pour": 0.0,        # oz
                     "last_pour_time": None,
                     "full_weight": float(initial_fw) if initial_fw else float(state["default_full"]),
-                    "recent_weights": [],    # for median filter
+                    "recent_weights": [],
                 }
 
             # --- Pour detection based on RAW readings ---
@@ -304,7 +307,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # --- Noise filtering for DISPLAY weight (only when NOT pouring) ---
             display_weight = weight_raw
             if not is_pour:
-                # short history for median filter
                 recent = info.setdefault("recent_weights", [])
                 recent.append(weight_raw)
                 if len(recent) > 5:
@@ -313,7 +315,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 sorted_recent = sorted(recent)
                 median_kg = sorted_recent[len(sorted_recent) // 2]
 
-                # EMA smoothing
                 alpha = state.get("smoothing_alpha", 0.3)
                 try:
                     alpha = float(alpha)
@@ -325,7 +326,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 previous_filtered = info.get("filtered_weight", median_kg)
                 filtered = (alpha * median_kg) + ((1.0 - alpha) * previous_filtered)
 
-                # Deadband – ignore small changes
                 deadband = state.get("noise_deadband_kg", 0.05)
                 try:
                     deadband = float(deadband)
@@ -343,7 +343,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             info["last_weight"] = display_weight
 
-            # --- Pour stats (use RAW values so real pours are not smoothed away) ---
+            # --- Pour stats (oz; ml handled in sensor.py based on display_units["pour"]) ---
             if is_pour:
                 delta_kg = round(raw_delta, 2)
                 delta_oz = round(delta_kg * KG_TO_OZ, 1)
@@ -365,7 +365,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     state["history"].pop(0)
                 await state["history_store"].async_save(state["history"][-MAX_LOG_ENTRIES:])
 
-            # --- Fill % (use DISPLAY weight so compressor noise is smoothed) ---
+            # --- Fill % (use DISPLAY weight) ---
             fw = (
                 info.get("full_weight")
                 or state["per_keg_full"].get(keg_id)
@@ -380,16 +380,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 fill_pct = 0.0
             fill_pct = max(0.0, min(100.0, fill_pct))
 
-            # Store raw values in kg/°C; sensor.py handles display units if needed.
-            # IMPORTANT: merge into any existing dict so we don't wipe out
-            # per-keg config fields like beer_sg / original_gravity.
+            # Merge with existing per-keg config (beer_sg, original_gravity, dates, etc.)
             existing = state["data"].get(keg_id, {})
 
             state["data"][keg_id] = {
-                **existing,  # preserve things like beer_sg, original_gravity, etc.
+                **existing,
                 "id": keg_id,
                 "name": norm["name"],
-                "weight": round(weight, 2),  # or display_weight if you're using smoothing
+                "weight": round(display_weight, 2),
                 "temperature": round(temp, 1) if temp is not None else None,
                 "full_weight": round(float(fw), 2) if fw else None,
                 "weight_calibrate": norm.get("weight_calibrate"),
@@ -408,8 +406,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.bus.async_fire(DEVICES_UPDATE_EVENT, {"ids": list(state["devices"])})
 
             hass.bus.async_fire(f"{DOMAIN}_update", {"keg_id": keg_id})
-
-        
 
         # ---------- WebSocket loop
 
@@ -495,7 +491,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # ---------- Services
 
-               
         async def export_history(call: ServiceCall) -> None:
             path = hass.config.path("www/beer_keg_history.json")
 
@@ -545,22 +540,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             base = _rest_base_from_ws(state["ws_url"])
             url = f"{base}/api/kegs/calibrate"
 
-            # 1) Selected keg id
+            # ------------------------------
+            # 1) Determine selected keg
+            # ------------------------------
+            keg_id = None
+
+            # First try the UI select entity
             dev_state = hass.states.get("select.keg_device")
-            if not dev_state or dev_state.state in ("unknown", "unavailable", ""):
+            if dev_state and dev_state.state not in ("unknown", "unavailable", ""):
+                keg_id = dev_state.state
+
+            # Fallback to internal selection saved by BeerKegDeviceSelect
+            if not keg_id:
+                keg_id = state.get("selected_device")
+
+            if not keg_id:
                 pn_create(hass, "No keg selected.", title="Beer Keg Calibration")
                 return
 
-            keg_id = dev_state.state
-
-            # 2) Keg name (optional, fallback to id)
+            # ------------------------------
+            # 2) Keg name (optional)
+            # ------------------------------
             name_state = hass.states.get("input_text.beer_keg_name")
             if name_state and name_state.state not in ("unknown", "unavailable", ""):
                 keg_name = name_state.state
             else:
                 keg_name = keg_id
 
-            # 3) Helper to safely read floats from number entities
+            # ------------------------------
+            # Helper to read floats
+            # ------------------------------
             def _get_float(ent_id: str, default: float = 0.0) -> float:
                 ent = hass.states.get(ent_id)
                 if not ent:
@@ -582,6 +591,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "temperature_calibrate": temp_cal,
             }
 
+            # ------------------------------
+            # 3) POST to server
+            # ------------------------------
             try:
                 async with aiohttp.ClientSession() as http_sess:
                     async with http_sess.post(url, json=payload) as resp:
@@ -596,113 +608,99 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error("%s: calibrate_keg failed: %s", DOMAIN, e)
                 pn_create(hass, f"Calibration failed: {e}", title="Beer Keg")
 
-        hass.services.async_register(DOMAIN, "calibrate_keg", calibrate_keg)
 
         async def set_display_units(call: ServiceCall) -> None:
-           """
-           Service to change weight / temperature / pour units.
-           Pour units can be 'oz' or 'ml'.
-           """
+            """
+            Service to change weight / temperature / pour units and persist them.
 
-           # 1) From service call
-           weight_unit = call.data.get("weight_unit")
-           temp_unit = call.data.get("temp_unit")
-           pour_unit = call.data.get("pour_unit")
+            Priority:
+            1) weight_unit / temp_unit / pour_unit from service data (if provided)
+            2) Helper entities (select/input_select)
+            3) Existing stored prefs (state["display_units"])
+            """
 
-           # 2) Fallback: read from helper entities
-           # Weight
-           if weight_unit not in ("kg", "lb", None):
-               weight_unit = None
-           if weight_unit is None:
-               for ent_id in WEIGHT_UNIT_ENTITIES:
-                   ent = hass.states.get(ent_id)
-                   if ent and ent.state in ("kg", "lb"):
-                       weight_unit = ent.state
-                       break
+            # 1) From service call data
+            weight_unit = call.data.get("weight_unit")
+            temp_unit = call.data.get("temp_unit")
+            pour_unit = call.data.get("pour_unit")
 
-           # Temperature
-           if temp_unit not in ("°C", "°F", None):
-               temp_unit = None
-           if temp_unit is None:
-               for ent_id in TEMP_UNIT_ENTITIES:
-                   ent = hass.states.get(ent_id)
-                   if ent and ent.state in ("°C", "°F"):
-                       temp_unit = ent.state
-                       break
+            # --- Weight ---
+            if weight_unit not in ("kg", "lb", None):
+                weight_unit = None
+            if weight_unit is None:
+                for ent_id in WEIGHT_UNIT_ENTITIES:
+                    ent = hass.states.get(ent_id)
+                    if ent and ent.state in ("kg", "lb"):
+                        weight_unit = ent.state
+                        break
+            if weight_unit is None:
+                weight_unit = state["display_units"].get("weight", "kg")
+            if weight_unit not in ("kg", "lb"):
+                weight_unit = "kg"
 
-           # Pour units (NEW)
-           if pour_unit not in ("oz", "ml", None):
-               pour_unit = None
-           if pour_unit is None:
-               pour_unit = state["display_units"].get("pour", "oz")
+            # --- Temperature ---
+            if temp_unit not in ("°C", "°F", None):
+                temp_unit = None
+            if temp_unit is None:
+                for ent_id in TEMP_UNIT_ENTITIES:
+                    ent = hass.states.get(ent_id)
+                    if ent and ent.state in ("°C", "°F"):
+                        temp_unit = ent.state
+                        break
+            if temp_unit is None:
+                temp_unit = state["display_units"].get("temp", "°C")
+            if temp_unit not in ("°C", "°F"):
+                temp_unit = "°C"
 
-           # 3) Apply defaults
-           if weight_unit is None:
-               weight_unit = state["display_units"].get("weight", "kg")
-           if temp_unit is None:
-               temp_unit = state["display_units"].get("temp", "°C")
-           if pour_unit is None:
-               pour_unit = "oz"
+            # --- Pour (oz/ml) ---
+            if pour_unit not in ("oz", "ml", None):
+                pour_unit = None
+            if pour_unit is None:
+                for ent_id in POUR_UNIT_ENTITIES:
+                    ent = hass.states.get(ent_id)
+                    if ent and ent.state in ("oz", "ml"):
+                        pour_unit = ent.state
+                        break
+            if pour_unit is None:
+                pour_unit = state["display_units"].get("pour", "oz")
+            if pour_unit not in ("oz", "ml"):
+                pour_unit = "oz"
 
-           # Save
-           state["display_units"] = {
+            # Save in memory
+            state["display_units"] = {
                 "weight": weight_unit,
                 "temp": temp_unit,
                 "pour": pour_unit,
-    }
+            }
 
-    # Persist so it survives reboot
-    await state["prefs_store"].async_save({"display_units": state["display_units"]})
+            # Persist so it survives reboot
+            await state["prefs_store"].async_save({"display_units": state["display_units"]})
 
-    # Notify UI
-    for keg_id in list(state.get("data", {}).keys()):
-        hass.bus.async_fire_
+            # Notify sensors/cards
+            for keg_id in list(state.get("data", {}).keys()):
+                hass.bus.async_fire(f"{DOMAIN}_update", {"keg_id": keg_id})
 
-
+            pn_create(
+                hass,
+                f"Units set: weight={weight_unit}, temp={temp_unit}, pour={pour_unit}",
+                title="Beer Keg",
+            )
+            _LOGGER.info(
+                "%s: Units applied weight=%s temp=%s pour=%s",
+                DOMAIN,
+                weight_unit,
+                temp_unit,
+                pour_unit,
+            )
 
         hass.services.async_register(DOMAIN, "set_display_units", set_display_units)
-        
+
         async def on_stop(event) -> None:
             """Save both history and prefs on shutdown."""
             await state["history_store"].async_save(state["history"][-MAX_LOG_ENTRIES:])
             await state["prefs_store"].async_save({"display_units": state["display_units"]})
-            
+
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, on_stop)
-
-        # ---------- Start after HA is running
-
-        async def _start_after_started(event=None) -> None:
-            # create entities for platforms
-            await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-            try:
-                await fetch_devices()
-                initial = await fetch_kegs()
-                for raw in initial:
-                    norm = _normalize_keg_dict(raw)
-                    await _publish_keg(norm)
-                _LOGGER.info("%s: Initial REST refresh found %d kegs", DOMAIN, len(initial))
-            except Exception as e:
-                _LOGGER.warning("%s: Initial refresh failed: %s", DOMAIN, e)
-
-            hass.async_create_task(connect_websocket())
-            async_track_time_interval(hass, rest_poll, timedelta(seconds=REST_POLL_SECONDS))
-            async_track_time_interval(hass, watchdog, timedelta(seconds=10))
-            async_track_time_interval(hass, _periodic_devices, timedelta(seconds=DEVICES_REFRESH_SEC))
-            _LOGGER.info("%s: started background tasks", DOMAIN)
-
-        if hass.state == "RUNNING":
-            hass.async_create_task(_start_after_started())
-        else:
-            hass.bus.async_listen_once("homeassistant_started", _start_after_started)
-
-        _LOGGER.info("%s: setup complete (WS+REST+poll+watchdog+devices+services)", DOMAIN)
-        return True
-
-    except Exception as e:
-        _LOGGER.exception("%s: setup_entry crashed: %s", DOMAIN, e)
-        return False
-
 
         # ---------- Start after HA is running
 

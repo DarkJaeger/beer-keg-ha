@@ -15,12 +15,13 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORM_EVENT = f"{DOMAIN}_update"
 
-# Base/meta definition – "unit" here is the *raw* unit our integration stores
-# in hass.data[DOMAIN][entry_id]["data"], not necessarily what we show on cards.
+# Base + display sensor definitions.
+# "unit" here is the *native* unit our integration stores,
+# not necessarily what we want to *display*.
 SENSOR_TYPES: Dict[str, Dict[str, Any]] = {
-    # ---- RAW BASE SENSORS (ALWAYS KG / °C / ETC.) ----
+    # --- RAW BASE SENSORS (HA-native, fixed units) ---
     "weight": {
-        "unit": "kg",           # raw
+        "unit": "kg",
         "name": "Weight",
         "key": "weight",
         "icon": "mdi:scale",
@@ -28,15 +29,35 @@ SENSOR_TYPES: Dict[str, Dict[str, Any]] = {
         "state_class": "measurement",
     },
     "temperature": {
-        "unit": "°C",           # raw
+        "unit": "°C",
         "name": "Temperature",
         "key": "temperature",
         "icon": "mdi:thermometer",
         "device_class": "temperature",
         "state_class": "measurement",
     },
+
+    # --- DISPLAY SENSORS (follow display_units; no HA auto-conversion) ---
+    "weight_display": {
+        "unit": None,              # set dynamically
+        "name": "Weight (Display)",
+        "key": "weight",
+        "icon": "mdi:scale",
+        "device_class": None,      # avoid HA unit coercion
+        "state_class": "measurement",
+    },
+    "temperature_display": {
+        "unit": None,
+        "name": "Temperature (Display)",
+        "key": "temperature",
+        "icon": "mdi:thermometer",
+        "device_class": None,
+        "state_class": "measurement",
+    },
+
+    # --- FILL LEVEL ---
     "fill_percent": {
-        "unit": "%",            # raw
+        "unit": "%",
         "name": "Fill Level",
         "key": "fill_percent",
         "icon": "mdi:cup",
@@ -45,16 +66,18 @@ SENSOR_TYPES: Dict[str, Dict[str, Any]] = {
     },
     # legacy alias
     "fill_level": {
-        "unit": "%",            # raw
+        "unit": "%",
         "name": "Fill Level",
         "key": "fill_percent",
         "icon": "mdi:cup",
         "device_class": None,
         "state_class": "measurement",
     },
+
+    # --- POUR / CONSUMPTION (base = oz) ---
     "last_pour": {
         "unit": "oz",
-        "name": "Last Pour",
+        "name": "Last Pour (oz)",
         "key": "last_pour",
         "icon": "mdi:cup-water",
         "device_class": None,
@@ -62,14 +85,34 @@ SENSOR_TYPES: Dict[str, Dict[str, Any]] = {
     },
     "daily_consumed": {
         "unit": "oz",
-        "name": "Daily Consumption",
+        "name": "Daily Consumption (oz)",
         "key": "daily_consumed",
         "icon": "mdi:beer",
         "device_class": None,
         "state_class": "total_increasing",
     },
+
+    # --- DISPLAY POUR/CONSUMPTION (oz/ml based on display_units.pour) ---
+    "last_pour_display": {
+        "unit": None,  # dynamic oz/ml
+        "name": "Last Pour (Display)",
+        "key": "last_pour",
+        "icon": "mdi:cup-water",
+        "device_class": None,
+        "state_class": "measurement",
+    },
+    "daily_consumption_display": {
+        "unit": None,
+        "name": "Daily Consumption (Display)",
+        "key": "daily_consumed",
+        "icon": "mdi:beer",
+        "device_class": None,
+        "state_class": "total_increasing",
+    },
+
+    # --- FULL WEIGHT / META ---
     "full_weight": {
-        "unit": "kg",           # raw
+        "unit": "kg",
         "name": "Full Weight",
         "key": "full_weight",
         "icon": "mdi:weight",
@@ -92,48 +135,8 @@ SENSOR_TYPES: Dict[str, Dict[str, Any]] = {
         "device_class": None,
         "state_class": None,
     },
-        "last_pour": {
-        "unit": "oz",
-        "name": "Last Pour",
-        "key": "last_pour",
-        "icon": "mdi:cup-water",
-        "device_class": None,
-        "state_class": "measurement",
-    },
-        "last_pour_ml": {
-        "unit": "ml",
-        "name": "Last Pour (ml)",
-        "key": "last_pour_ml",
-        "icon": "mdi:cup-water",
-        "device_class": None,
-        "state_class": "measurement",
-    },
-
-    # ---- NEW: DISPLAY SENSORS (FOLLOW display_units) ----
-    # These are what you’ll point your Lovelace cards at.
-    "weight_display": {
-        "unit": "kg",  # base (we override dynamically)
-        "name": "Weight Display",
-        "key": "weight",  # still reading raw kg from state["data"]
-        "icon": "mdi:scale",
-        "device_class": None,           # keep this free so HA doesn't fight us
-        "state_class": "measurement",
-    },
-    "temperature_display": {
-        "unit": "°C",  # base
-        "name": "Temperature Display",
-        "key": "temperature",  # raw °C from state["data"]
-        "icon": "mdi:thermometer",
-        "device_class": None,           # no enforced units
-        "state_class": "measurement",
-    },
 }
 
-def short_id(keg_id: str, length: int = 4) -> str:
-    """Return a shortened keg ID for entity naming."""
-    if not keg_id:
-        return "unknown"
-    return keg_id[:length]
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -145,7 +148,7 @@ async def async_setup_entry(
     created: Set[str] = state.setdefault("created_kegs", set())
 
     def create_for(keg_id: str) -> None:
-        """Create all sensors for one keg_id (once)."""
+        # Create all sensors (raw + display) for one keg_id (once).
         if keg_id in created:
             return
 
@@ -191,20 +194,23 @@ class KegSensor(SensorEntity):
         self._state_ref: Dict[str, Any] = hass.data[DOMAIN][entry.entry_id]
         self._meta = SENSOR_TYPES[sensor_type]
 
-        short = short_id(keg_id)
+        # Shorten keg id in name for cosmetics
+        short_id = keg_id[:4]
 
-        self._attr_name = f"Keg {short} {self._meta['name']}"
-        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_{short}_{sensor_type}"
+        self._attr_name = f"Keg {short_id} {self._meta['name']}"
+        self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_{keg_id}_{sensor_type}"
         self._attr_icon = self._meta.get("icon")
         self._attr_device_class = self._meta.get("device_class")
         self._attr_state_class = self._meta.get("state_class")
+        # Start with base unit; display units may adjust this in native_value
         self._attr_native_unit_of_measurement = self._meta.get("unit")
 
     @property
     def device_info(self) -> DeviceInfo:
+        short_id = self.keg_id[:4]
         return DeviceInfo(
             identifiers={(DOMAIN, f"{self.entry.entry_id}_{self.keg_id}")},
-            name=f"Beer Keg {self.keg_id}",
+            name=f"Beer Keg {short_id}",
             manufacturer="Beer Keg",
             model="WebSocket + REST",
         )
@@ -216,22 +222,20 @@ class KegSensor(SensorEntity):
         du = self._state_ref.get("display_units") or {}
         weight_u = du.get("weight", "kg")
         temp_u = du.get("temp", "°C")
-        volume_u = du.get("volume", "oz")
+        pour_u = du.get("pour", "oz")
 
         if weight_u not in ("kg", "lb"):
             weight_u = "kg"
         if temp_u not in ("°C", "°F"):
             temp_u = "°C"
-        if volume_u not in ("oz", "ml"):
-            volume_u = "oz"
+        if pour_u not in ("oz", "ml"):
+            pour_u = "oz"
 
-        return {"weight": weight_u, "temp": temp_u, "volume": volume_u}
-
+        return {"weight": weight_u, "temp": temp_u, "pour": pour_u}
 
     # ---- core value ----
 
     @property
-        @property
     def native_value(self) -> Any:
         """Return value, converted according to Beer Keg display units."""
         data: Dict[str, Dict[str, Any]] = self._state_ref.get("data", {})
@@ -242,24 +246,43 @@ class KegSensor(SensorEntity):
 
         units = self._get_display_units()
 
-        # ---- weight & full_weight (stored as kg) ----
-        if self.sensor_type in ("weight", "full_weight"):
+        # ========== RAW FIXED-UNIT SENSORS ==========
+        if self.sensor_type == "weight":
+            # Always base kg for HA
+            try:
+                raw_kg = float(raw)
+            except (TypeError, ValueError):
+                return None
+            self._attr_native_unit_of_measurement = "kg"
+            return round(raw_kg, 2)
+
+        if self.sensor_type == "temperature":
+            # Always base °C for HA
+            try:
+                raw_c = float(raw)
+            except (TypeError, ValueError):
+                return None
+            self._attr_native_unit_of_measurement = "°C"
+            return round(raw_c, 1)
+
+        # ========== DISPLAY SENSORS (follow display_units) ==========
+
+        # ---- DISPLAY weight ----
+        if self.sensor_type == "weight_display":
             try:
                 raw_kg = float(raw)
             except (TypeError, ValueError):
                 return None
 
             if units["weight"] == "lb":
-                # convert kg -> lb
                 self._attr_native_unit_of_measurement = "lb"
                 return round(raw_kg * 2.20462, 2)
             else:
-                # stay in kg
                 self._attr_native_unit_of_measurement = "kg"
                 return round(raw_kg, 2)
 
-        # ---- temperature (stored as °C) ----
-        if self.sensor_type == "temperature":
+        # ---- DISPLAY temperature ----
+        if self.sensor_type == "temperature_display":
             try:
                 raw_c = float(raw)
             except (TypeError, ValueError):
@@ -272,56 +295,46 @@ class KegSensor(SensorEntity):
                 self._attr_native_unit_of_measurement = "°C"
                 return round(raw_c, 1)
 
-        # ---- volume (stored as oz) ----
-        if self.sensor_type in ("last_pour", "daily_consumed"):
+        # ---- DISPLAY pour: last_pour_display ----
+        if self.sensor_type == "last_pour_display":
             try:
                 raw_oz = float(raw)
             except (TypeError, ValueError):
                 return None
 
-            if units["volume"] == "ml":
-                # 1 US fl oz = 29.5735 ml
+            if units["pour"] == "ml":
                 self._attr_native_unit_of_measurement = "ml"
-                return int(round(raw_oz * 29.5735))
+                return round(raw_oz * 29.5735, 0)
             else:
                 self._attr_native_unit_of_measurement = "oz"
                 return round(raw_oz, 1)
 
-        # ---- everything else: no conversion ----
-        self._attr_native_unit_of_measurement = self._meta.get("unit")
-        return raw
-
-        # ---- DISPLAY SENSORS: follow display_units ----
-
-        if self.sensor_type == "weight_display":
-            units = self._get_display_units()
+        # ---- DISPLAY pour: daily_consumption_display ----
+        if self.sensor_type == "daily_consumption_display":
             try:
-                raw_kg = float(raw)
+                raw_oz = float(raw)
             except (TypeError, ValueError):
                 return None
 
-            if units["weight"] == "lb":
-                self._attr_native_unit_of_measurement = "lb"
-                return round(raw_kg * 2.20462, 2)
+            if units["pour"] == "ml":
+                self._attr_native_unit_of_measurement = "ml"
+                return round(raw_oz * 29.5735, 0)
             else:
-                self._attr_native_unit_of_measurement = "kg"
-                return round(raw_kg, 2)
+                self._attr_native_unit_of_measurement = "oz"
+                return round(raw_oz, 1)
 
-        if self.sensor_type == "temperature_display":
-            units = self._get_display_units()
+        # ========== BASE POUR / OTHER META (no dynamic conversion here) ==========
+
+        if self.sensor_type in ("last_pour", "daily_consumed"):
+            # always stay in oz here; display_* variants handle ml.
             try:
-                raw_c = float(raw)
+                raw_oz = float(raw)
             except (TypeError, ValueError):
                 return None
+            self._attr_native_unit_of_measurement = "oz"
+            return round(raw_oz, 1)
 
-            if units["temp"] == "°F":
-                self._attr_native_unit_of_measurement = "°F"
-                return round((raw_c * 9.0 / 5.0) + 32.0, 1)
-            else:
-                self._attr_native_unit_of_measurement = "°C"
-                return round(raw_c, 1)
-
-        # ---- everything else: no conversion ----
+        # all remaining fields just return their stored value
         self._attr_native_unit_of_measurement = self._meta.get("unit")
         return raw
 
@@ -335,5 +348,5 @@ class KegSensor(SensorEntity):
     def _refresh_if_mine(self, event) -> None:
         """Refresh state when our keg_id gets an update event."""
         if (event.data or {}).get("keg_id") == self.keg_id:
+            # Recompute native_value + native_unit_of_measurement
             self.async_write_ha_state()
-
