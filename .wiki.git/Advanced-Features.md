@@ -1,3 +1,0 @@
-# Advanced Features
-
-Noise filtering, smoothing, pour history...

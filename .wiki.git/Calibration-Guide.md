@@ -1,3 +1,0 @@
-# Calibration Guide
-
-Instructions for performing keg calibration...

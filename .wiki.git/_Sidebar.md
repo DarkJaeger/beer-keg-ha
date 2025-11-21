@@ -1,8 +1,0 @@
-* [[Home]]
-* [[Installation]]
-* [[Calibration Guide]]
-* [[Display Units]]
-* [[Advanced Features]]
-* [[Troubleshooting]]
-* [[Changelog v2.0.0]]
-* [[Developer Notes]]
