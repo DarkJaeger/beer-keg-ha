@@ -1,0 +1,3 @@
+# Developer Notes
+
+Architecture, APIs, code layout...
