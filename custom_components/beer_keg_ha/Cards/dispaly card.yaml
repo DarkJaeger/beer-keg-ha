@@ -3,25 +3,31 @@ cards:
   - type: entities
     title: 🍺 Tap 1 Status
     entities:
-      - entity: sensor.keg_d00dcafe5ded57971fce7ec1b3ff4253_weight_display
+      - entity: sensor.keg_d00d_weight_display
         name: Current Weight
         icon: mdi:scale
-      - entity: sensor.keg_d00dcafe5ded57971fce7ec1b3ff4253_fill_level
+      - entity: sensor.keg_d00d_fill_level
         name: Fill Level
         icon: mdi:beer
-      - entity: sensor.keg_d00dcafe5ded57971fce7ec1b3ff4253_temperature_display
+      - entity: sensor.keg_d00d_temperature_display
         name: Temperature
         icon: mdi:thermometer
-      - entity: sensor.keg_d00dcafe5ded57971fce7ec1b3ff4253_last_pour
+      - entity: sensor.keg_d00d_last_pour_display
         name: Last Pour
         icon: mdi:cup
-      - entity: sensor.keg_d00dcafe5ded57971fce7ec1b3ff4253_daily_consumption
+      - entity: sensor.keg_d00d_daily_consumption_display
         name: Daily Consumption
         icon: mdi:calendar-today
-      - entity: sensor.keg_d00dcafe5ded57971fce7ec1b3ff4253_name
+      - entity: sensor.keg_d00d_name
         name: TAP1
+      - entity: text.keg_d00d_original_gravity
+      - entity: text.keg_d00d_beer_sg
+      - entity: date.keg_d00d_kegged_date_2
+        name: Date Kegged
+      - entity: date.keg_d00d_expiration_date_2
+        name: Expiration Date
   - type: gauge
-    entity: sensor.keg_d00dcafe5ded57971fce7ec1b3ff4253_fill_level
+    entity: sensor.keg_d00d_fill_level
     name: Tap1 Fill %
     min: 0
     max: 100
@@ -33,7 +39,10 @@ cards:
     title: Tap1 – Last 24h
     hours_to_show: 24
     entities:
-      - entity: sensor.keg_d00dcafe5ded57971fce7ec1b3ff4253_weight
+      - entity: sensor.keg_d00d_weight_display
         name: Weight
-      - entity: sensor.keg_d00dcafe5ded57971fce7ec1b3ff4253_daily_consumption
+      - entity: sensor.keg_d00d_daily_consumption_display
         name: Daily Consumption
+grid_options:
+  rows: auto
+  columns: 15
