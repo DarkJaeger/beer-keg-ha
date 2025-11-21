@@ -8,7 +8,6 @@ from homeassistant.components.number import (
     NumberMode,
 )
 from homeassistant.config_entries import ConfigEntry
-    # noqa: E402
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -19,8 +18,15 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORM_EVENT = f"{DOMAIN}_update"
 
+#
 # Per-keg number types
-NUMBER_TYPES = {
+#
+# These become entities like:
+#   number.keg_d00d_full_weight_kg
+#   number.keg_d00d_weight_calibrate
+#   number.keg_d00d_temp_calibrate_degc
+#
+NUMBER_TYPES: Dict[str, Dict[str, Any]] = {
     "full_weight_kg": {
         "name": "Full Weight (kg)",
         "key": "full_weight",
@@ -37,7 +43,7 @@ NUMBER_TYPES = {
         "step": 0.01,
         "mode": NumberMode.BOX,
     },
-    "temp_calibrate_c": {
+    "temp_calibrate_degc": {
         "name": "Temp Calibrate (°C)",
         "key": "temperature_calibrate",
         "min": -10.0,
@@ -45,7 +51,7 @@ NUMBER_TYPES = {
         "step": 0.1,
         "mode": NumberMode.BOX,
     },
-    # NEW: per-keg Beer SG (current / target gravity)
+    # Optional: per-keg Beer SG (current gravity)
     "beer_sg": {
         "name": "Beer SG",
         "key": "beer_sg",
@@ -54,7 +60,7 @@ NUMBER_TYPES = {
         "step": 0.001,
         "mode": NumberMode.BOX,
     },
-    # NEW: per-keg Original Gravity (OG)
+    # Optional: per-keg Original Gravity (OG)
     "original_gravity": {
         "name": "Original Gravity",
         "key": "original_gravity",
@@ -65,10 +71,12 @@ NUMBER_TYPES = {
     },
 }
 
-# GLOBAL smoothing controls (one per integration entry, not per keg)
-GLOBAL_NUMBER_TYPES = {
+#
+# Global smoothing controls (one per integration entry, not per keg)
+#
+GLOBAL_NUMBER_TYPES: Dict[str, Dict[str, Any]] = {
     "noise_deadband_kg": {
-        "name": "Noise Deadband (kg)",
+        "name": "Beer Keg Noise Deadband (kg)",
         "state_key": "noise_deadband_kg",
         "min": 0.0,
         "max": 0.5,
@@ -77,7 +85,7 @@ GLOBAL_NUMBER_TYPES = {
         "default": 0.05,
     },
     "smoothing_alpha": {
-        "name": "Smoothing Alpha",
+        "name": "Beer Keg Smoothing Alpha",
         "state_key": "smoothing_alpha",
         "min": 0.05,
         "max": 1.0,
@@ -101,6 +109,15 @@ async def async_setup_entry(
     #
     # 1) Global smoothing sliders (once per integration entry)
     #
+    state.setdefault(
+        "noise_deadband_kg",
+        GLOBAL_NUMBER_TYPES["noise_deadband_kg"]["default"],
+    )
+    state.setdefault(
+        "smoothing_alpha",
+        GLOBAL_NUMBER_TYPES["smoothing_alpha"]["default"],
+    )
+
     for key, meta in GLOBAL_NUMBER_TYPES.items():
         entities.append(BeerKegGlobalNumberEntity(hass, entry, key, meta))
 
@@ -110,6 +127,7 @@ async def async_setup_entry(
     created: Set[str] = state.setdefault("created_number_kegs", set())
 
     def create_for(keg_id: str) -> None:
+        """Create all number entities for one keg_id (once)."""
         if keg_id in created:
             return
 
@@ -122,22 +140,21 @@ async def async_setup_entry(
     for keg_id in list(state.get("data", {}).keys()):
         create_for(keg_id)
 
+    # Add initial batch (global + existing kegs)
     async_add_entities(entities, True)
 
     @callback
     def _on_update(event) -> None:
         """Create entities for new kegs when they appear."""
         keg_id = (event.data or {}).get("keg_id")
-        if keg_id:
-            # Only create if not already present
-            if keg_id not in created:
-                new_entities: List[NumberEntity] = []
-                for num_type in NUMBER_TYPES.keys():
-                    new_entities.append(
-                        BeerKegNumberEntity(hass, entry, keg_id, num_type)
-                    )
-                created.add(keg_id)
-                async_add_entities(new_entities, True)
+        if not keg_id or keg_id in created:
+            return
+
+        new_entities: List[NumberEntity] = []
+        for num_type in NUMBER_TYPES.keys():
+            new_entities.append(BeerKegNumberEntity(hass, entry, keg_id, num_type))
+        created.add(keg_id)
+        async_add_entities(new_entities, True)
 
     entry.async_on_unload(
         hass.bus.async_listen(PLATFORM_EVENT, _on_update)
@@ -162,7 +179,7 @@ class BeerKegGlobalNumberEntity(NumberEntity):
         self._default = meta["default"]
 
         self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_global_{key}"
-        self._attr_name = f"Beer Keg {meta['name']}"
+        self._attr_name = meta["name"]
         self._attr_mode = meta["mode"]
         self._attr_native_min_value = meta["min"]
         self._attr_native_max_value = meta["max"]
@@ -194,7 +211,7 @@ class BeerKegGlobalNumberEntity(NumberEntity):
         # Nudge all kegs so sensors recalc with new smoothing
         for keg_id in list(domain_state.get("data", {}).keys()):
             self.hass.bus.async_fire(
-                f"{DOMAIN}_update",
+                PLATFORM_EVENT,
                 {"keg_id": keg_id},
             )
 
@@ -221,7 +238,7 @@ class BeerKegNumberEntity(NumberEntity):
         meta = NUMBER_TYPES[num_type]
         self._key = meta["key"]
 
-        short_id = keg_id[:4]  # cosmetic short ID
+        short_id = keg_id[:4]  # cosmetic short ID in names
 
         self._attr_unique_id = f"{DOMAIN}_{entry.entry_id}_{keg_id}_{num_type}"
         self._attr_name = f"Keg {short_id} {meta['name']}"
@@ -239,7 +256,6 @@ class BeerKegNumberEntity(NumberEntity):
         elif self._key == "temperature_calibrate":
             self._attr_native_unit_of_measurement = "°C"
         else:
-            # beer_sg / original_gravity = no units
             self._attr_native_unit_of_measurement = None
 
     @property
@@ -256,7 +272,8 @@ class BeerKegNumberEntity(NumberEntity):
     @property
     def native_value(self) -> float | None:
         """Return the current value from integration state."""
-        data: Dict[str, Dict[str, Any]] = self.hass.data[DOMAIN][self.entry.entry_id]["data"]
+        domain_state = self.hass.data[DOMAIN][self.entry.entry_id]
+        data: Dict[str, Dict[str, Any]] = domain_state.get("data", {})
         keg = data.get(self.keg_id, {})
         val = keg.get(self._key)
         if val is None:
@@ -267,7 +284,7 @@ class BeerKegNumberEntity(NumberEntity):
             return None
 
     async def async_set_native_value(self, value: float) -> None:
-        """Update the value in integration state (does NOT call REST yet)."""
+        """Update the value in integration state (does NOT call REST directly)."""
         domain_state = self.hass.data[DOMAIN][self.entry.entry_id]
         data: Dict[str, Dict[str, Any]] = domain_state.setdefault("data", {})
         keg = data.setdefault(self.keg_id, {})
@@ -275,7 +292,7 @@ class BeerKegNumberEntity(NumberEntity):
 
         # Let any listening sensors/cards update
         self.hass.bus.async_fire(
-            f"{DOMAIN}_update",
+            PLATFORM_EVENT,
             {"keg_id": self.keg_id},
         )
         self.async_write_ha_state()
@@ -291,4 +308,3 @@ class BeerKegNumberEntity(NumberEntity):
         self.async_on_remove(
             self.hass.bus.async_listen(PLATFORM_EVENT, _handle_update)
         )
-

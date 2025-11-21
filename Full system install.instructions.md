@@ -110,15 +110,30 @@ Host: 192.168.1.50
 Port: 6080
 Optional: Configure via HTTP GET
 http://192.168.4.1/config?ssid=My+Wifi&pass=my_password&blynk=00000000000000000000000000000001&host=192.168.0.123&port=6080
+
+  4. Install Hacs community store in Home Assistant (if not already done)
+To install HACS, follow the official instructions:
+https://hacs.xyz/docs/installation/manual
+To add the HACS add-on repository to your Home Assistant, select this my link.
+https://my.home-assistant.io/redirect/supervisor_addon/?addon=cb646a50_get&repository_url=https%3A%2F%2Fgithub.com%2Fhacs%2Faddons
+When prompted to confirm if you want to open the page in Home Assistant, check if the URL is correct. Then, select Open link.
+In the Missing add-on repository dialog, select Add.
+You have now added the repository that allows you to download HACS to Home Assistant.
+In the Get HACS add-on, select Install.
+Start the add-on.
+Navigate to the add-on logs and follow the instructions given there.
+Finalizing steps
+Restart Home Assistant.
+Follow the steps on setting up the HACS integration.
 ________________________________________
-🔌 4. Install Beer-Keg-HA Integration
+🔌 5. Install Beer-Keg-HA Integration
 1. Download the repository:
 https://github.com/DarkJaeger/beer_keg_ha
 2. Copy to Home Assistant:
 /config/custom_components/beer_keg_ha/
 3. Restart Home Assistant
 ________________________________________
-🔧 5. Add Integration in Home Assistant
+🔧 6. Add Integration in Home Assistant
 Go to:
 Settings → Devices & Services → Add Integration → Beer Keg Scale
 You will be asked for:
@@ -132,13 +147,13 @@ After adding:
 ✔ Keg devices populate automatically
 ✔ Calibration values initialized
 ________________________________________
-⚙️ 6. Unit Controls (lb/kg & °F/°C)
+⚙️ 7. Unit Controls (lb/kg & °F/°C)
 Two select entities are created:
 •	select.keg_weight_unit
 •	select.keg_temperature_unit
 Changing these immediately updates all keg sensors.
 ________________________________________
-🧰 7. Calibration Tools
+🧰 8. Calibration Tools
 Each keg has three calibration values:
 •	Full Weight (kg)
 •	Weight Offset
@@ -147,7 +162,7 @@ These are Number entities under the keg device.
 Calibration is sent back to the API via the service:
 beer_keg_ha.calibrate_keg
 ________________________________________
-📊 8. Pour Tracking & Keg History
+📊 9. Pour Tracking & Keg History
 The integration automatically:
 •	Detects pours (weight drop > threshold)
 •	Converts kg → oz
@@ -158,7 +173,7 @@ beer_keg_ha.export_history
 Saved as:
 /www/beer_keg_history.json
 ________________________________________
-📺 9. Sample Lovelace Card
+📺 10. Sample Lovelace Card
 type: entities
 title: Keg Status
 entities:
@@ -169,7 +184,7 @@ entities:
   - select.keg_weight_unit
   - select.keg_temperature_unit
 ________________________________________
-🛠️ 10. Useful Services
+🛠️ 11. Useful Services
 Service	Description
 beer_keg_ha.refresh_kegs	Force update from REST API
 beer_keg_ha.republish_all	Re-broadcast all sensor data

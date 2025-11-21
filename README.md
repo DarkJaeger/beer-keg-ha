@@ -85,3 +85,5 @@ Live keg weight, temperature, fill %, pours, and history — with WebSocket + RE
 
 4.\Try the install again
 
+\For a full system install guide click on this link
+\ https://github.com/DarkJaeger/beer_keg_ha/blob/main/Full%20system%20install.instructions.md
