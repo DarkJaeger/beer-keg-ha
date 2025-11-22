@@ -14,7 +14,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_track_time_interval, async_track_time_change
 from homeassistant.helpers.storage import Store
 
 from .const import (
@@ -475,6 +475,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async def _periodic_devices(_now: datetime | None) -> None:
             await fetch_devices()
 
+        async def reset_daily_consumption(_now: datetime | None = None) -> None:
+            """Reset daily_consumed for all kegs at local midnight."""
+            try:
+                for keg_id, info in state.get("kegs", {}).items():
+                    # Reset runtime stats
+                    info["daily_consumed"] = 0.0
+
+                    # Reset exposed data if present
+                    if keg_id in state.get("data", {}):
+                        state["data"][keg_id]["daily_consumed"] = 0.0
+
+                    # Nudge HA entities to update
+                    hass.bus.async_fire(f"{DOMAIN}_update", {"keg_id": keg_id})
+
+                _LOGGER.info("%s: daily_consumed reset to 0 for %d kegs", DOMAIN, len(state.get("kegs", {})))
+            except Exception as e:
+                _LOGGER.error("%s: failed resetting daily_consumed: %s", DOMAIN, e)
+
         # ---------- Services
 
         async def export_history(call: ServiceCall) -> None:
@@ -782,6 +800,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             async_track_time_interval(hass, rest_poll, timedelta(seconds=REST_POLL_SECONDS))
             async_track_time_interval(hass, watchdog, timedelta(seconds=10))
             async_track_time_interval(hass, _periodic_devices, timedelta(seconds=DEVICES_REFRESH_SEC))
+
+             # Reset daily_consumed at local midnight
+            async_track_time_change(hass, reset_daily_consumption, hour=0, minute=0, second=0)
+            
             _LOGGER.info("%s: started background tasks", DOMAIN)
 
         if hass.state == "RUNNING":
